@@ -1,7 +1,7 @@
 import { Service } from '@n8n/di';
 import { parse } from 'flatted';
 import { ErrorReporter, Logger } from 'n8n-core';
-import { ExecutionCancelledError, NodeConnectionType, Workflow } from 'n8n-workflow';
+import { ExecutionCancelledError, NodeConnectionTypes, Workflow } from 'n8n-workflow';
 import type {
 	IDataObject,
 	IRun,
@@ -12,6 +12,7 @@ import type {
 import assert from 'node:assert';
 
 import { ActiveExecutions } from '@/active-executions';
+import config from '@/config';
 import type { ExecutionEntity } from '@/databases/entities/execution-entity';
 import type { MockedNodeItem, TestDefinition } from '@/databases/entities/test-definition.ee';
 import type { TestRun } from '@/databases/entities/test-run.ee';
@@ -127,7 +128,7 @@ export class TestRunnerService {
 
 		// Start nodes are the nodes that are connected to the trigger node
 		const startNodes = workflowInstance
-			.getChildNodes(triggerNode, NodeConnectionType.Main, 1)
+			.getChildNodes(triggerNode, NodeConnectionTypes.Main, 1)
 			.map((nodeName) => ({
 				name: nodeName,
 				sourceData: { previousNode: pastExecutionTriggerNode },
@@ -164,9 +165,17 @@ export class TestRunnerService {
 			pastExecutionWorkflowData,
 		);
 
+		const startNodesData = this.getStartNodesData(
+			workflow,
+			pastExecutionData,
+			pastExecutionWorkflowData,
+		);
+
 		// Prepare the data to run the workflow
+		// Evaluation executions should run the same way as manual,
+		// because they need pinned data and partial execution logic
 		const data: IWorkflowExecutionDataProcess = {
-			...this.getStartNodesData(workflow, pastExecutionData, pastExecutionWorkflowData),
+			...startNodesData,
 			executionMode: 'evaluation',
 			runData: {},
 			pinData,
@@ -174,6 +183,25 @@ export class TestRunnerService {
 			userId: metadata.userId,
 			partialExecutionVersion: 2,
 		};
+
+		// When in queue mode, we need to pass additional data to the execution
+		// the same way as it would be passed in manual mode
+		if (config.getEnv('executions.mode') === 'queue') {
+			data.executionData = {
+				startData: {
+					startNodes: startNodesData.startNodes,
+				},
+				resultData: {
+					pinData,
+					runData: {},
+				},
+				manualData: {
+					userId: metadata.userId,
+					partialExecutionVersion: 2,
+					triggerToStartFrom: startNodesData.triggerToStartFrom,
+				},
+			};
+		}
 
 		// Trigger the workflow under test with mocked data
 		const executionId = await this.workflowRunner.run(data);
